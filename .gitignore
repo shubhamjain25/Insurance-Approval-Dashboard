@@ -33,3 +33,7 @@ dist-ssr
 
 # Directories
 dump/
+
+#Environment variables
+.env
+.env.local

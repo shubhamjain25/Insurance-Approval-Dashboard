@@ -179,20 +179,20 @@ export function evaluateEligibility(input: EligibilityInput): EligibilityOutput 
   // the rule list for transparency; it's just not a gate.
   const passed = rules.every((r) => r.ok);
 
-  // 11. Same-day fraud threshold — informational. A flagged pattern is
-  // surfaced via sameDayCount/sameDayFlagged and handled downstream by the
-  // Final Analysis stage (human review), not blocked here.
-  const sameDayCount = claims.filter(
-    (c) => c.submitted_at.slice(0, 10) === today && c.primary_member_id === input.primary.member_id,
-  ).length;
-  const sameDayFlagged = sameDayCount >= policy.fraud_thresholds.same_day_claims_limit;
-  rules.push({
-    ok: !sameDayFlagged,
-    label: `Daily submission limit (${policy.fraud_thresholds.same_day_claims_limit})`,
-    detail: sameDayFlagged
-      ? `${sameDayCount} submitted today — flagged for human review at final analysis, not blocked here`
-      : `${sameDayCount} submitted today`,
-  });
+  // // 11. Same-day fraud threshold — informational. A flagged pattern is
+  // // surfaced via sameDayCount/sameDayFlagged and handled downstream by the
+  // // Final Analysis stage (human review), not blocked here.
+  // const sameDayCount = claims.filter(
+  //   (c) => c.submitted_at.slice(0, 10) === today && c.primary_member_id === input.primary.member_id,
+  // ).length;
+  // const sameDayFlagged = sameDayCount >= policy.fraud_thresholds.same_day_claims_limit;
+  // rules.push({
+  //   ok: !sameDayFlagged,
+  //   label: `Daily submission limit (${policy.fraud_thresholds.same_day_claims_limit})`,
+  //   detail: sameDayFlagged
+  //     ? `${sameDayCount} submitted today — flagged for human review at final analysis, not blocked here`
+  //     : `${sameDayCount} submitted today`,
+  // });
 
   // Payable: cap first (per-claim limit, category sub-limit, combined OPD
   // pool) — THEN network discount — THEN co-pay on what's left after discount.
@@ -252,7 +252,5 @@ export function evaluateEligibility(input: EligibilityInput): EligibilityOutput 
     copay,
     networkDiscount,
     notes,
-    sameDayCount,
-    sameDayFlagged,
   };
 }
