@@ -77,7 +77,7 @@ const STAGES: { id: StageId; title: string; subtitle: string }[] = [
 ];
 
 const HOSPITAL_OTHER = "__OTHER__";
-const MAX_DOC_ATTEMPTS = 3;
+const MAX_DOC_ATTEMPTS = 2;
 function decideFromAverage(avg: number): "SUCCESS" | "HUMAN_REVIEW" {
   return avg >= 0.8 ? "SUCCESS" : "HUMAN_REVIEW";
 }
@@ -256,6 +256,20 @@ export function ClaimWizard({
       }
       setLocked((l) => ({ ...l, claim: true }));
       setEligibility(verifyResult);
+      logEvent("claim", "Claim information captured", {
+        claim_information: {
+          primary_member_id: primary?.member_id,
+          claimant_id: claimant?.member_id,
+          claimant_name: claimant?.name,
+          relationship: claimant?.relationship,
+          category,
+          treatment_date: treatmentDate,
+          claimed_amount: Number(amount),
+          hospital,
+          in_network: inNetwork,
+          // admin_override: adminOverride,
+        },
+      });
       setCurrent("eligibility");
     } else if (stage === "eligibility") {
       if (!eligibility?.passed)
@@ -583,14 +597,16 @@ export function ClaimWizard({
     await new Promise((r) => setTimeout(r, 500));
     const amt = Number(amount);
     const docOutcome = computeDocumentsOutcome();
+
     let status: StoredClaim["status"] = !eligibility.passed
       ? "REJECTED"
       : docManualReview
       ? "PENDING_REVIEW"
       : docOutcome.status;
     if (status !== "REJECTED" && status !== "PENDING_REVIEW" && finalAnalysis?.outcome === "HUMAN_REVIEW") {
-      status = "PENDING_REVIEW";
+      status = "UNDER_REVIEW";
     }
+
     const approvedAmount =
       status === "APPROVED" ? eligibility.approvedAmount : status === "UNDER_REVIEW" ? eligibility.approvedAmount : 0;
 
@@ -615,7 +631,7 @@ export function ClaimWizard({
       amount: amt,
       approved_amount: approvedAmount,
       status,
-      admin_override: adminOverride,
+      // admin_override: adminOverride,
       reason:
         status === "REJECTED"
           ? eligibility.rules.filter((r) => !r.ok).map((r) => r.label).join("; ")
@@ -682,7 +698,7 @@ export function ClaimWizard({
       amount: Number(amount) || 0,
       approved_amount: 0,
       status: "CANCELLED",
-      admin_override: adminOverride,
+      // admin_override: adminOverride,
       reason,
       documents: buildDocumentRecords(),
       log,
@@ -932,7 +948,7 @@ export function ClaimWizard({
                   </div>
 
                   {/* ---- ADMIN OVERRIDE (plug-in) ---- */}
-                  <div className="sm:col-span-2 rounded-lg border border-dashed border-border bg-muted/30 p-3">
+                  {/* <div className="sm:col-span-2 rounded-lg border border-dashed border-border bg-muted/30 p-3">
                     <Label htmlFor="admin-override" className="text-xs uppercase tracking-wide text-muted-foreground">
                       admin_override
                     </Label>
@@ -956,7 +972,7 @@ export function ClaimWizard({
                         Overrides date-related eligibility failures only.
                       </p>
                     </div>
-                  </div>
+                  </div> */}
                   {/* ---- END ADMIN OVERRIDE ---- */}
 
                   <div className="sm:col-span-2 space-y-3">

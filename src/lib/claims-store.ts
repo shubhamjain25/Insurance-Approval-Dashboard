@@ -40,7 +40,7 @@ export type StoredClaim = {
   approved_amount: number;
   status: ClaimStatus;
   reason: string;
-  admin_override?: "YES" | "NO";
+  // admin_override?: "YES" | "NO";
   documents: DocVerification[];
   log?: ClaimLogEntry[]; // full chronological event trail for this ticket
 };

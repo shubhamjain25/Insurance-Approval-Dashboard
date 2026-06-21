@@ -2,16 +2,20 @@
 // Implements a confidence-based decision layer:
 //   - result === "FAIL" && confidence >= 0.7  -> FAILED  (user gets up to 3 tries)
 //   - result === "PASS" && confidence >= 0.6  -> APPROVED (locked)
-//   - everything else                         -> UNDER_REVIEW
+//   - everything else                          -> UNDER_REVIEW
 
 import type { CategoryKey } from "./policy";
 
-export type ApiCategory = "CONSULTATION" | "OPD" | "IPD" | "PHARMACY";
+export type ApiClaimCategory = "CONSULTATION" | "DIAGNOSTIC" | "PHARMACY" | "DENTAL" | "VISION" | "ALTERNATIVE_MEDICINE";
 
-export function mapCategoryToApi(c: CategoryKey): ApiCategory {
+export function mapCategoryToApi(c: CategoryKey): ApiClaimCategory {
   if (c === "consultation") return "CONSULTATION";
+  if (c === "diagnostic") return "DIAGNOSTIC";
   if (c === "pharmacy") return "PHARMACY";
-  return "OPD";
+  if (c === "dental") return "DENTAL";
+  if (c === "vision") return "VISION";
+  if (c === "alternative_medicine") return "ALTERNATIVE_MEDICINE";
+  return "CONSULTATION"; // fallback
 }
 
 export type ProcessingResult = {
@@ -40,7 +44,7 @@ export async function verifyDocument(params: {
   file: File;
   document_category: string; // which document this is — "PRESCRIPTION", "HOSPITAL_BILL", etc.
   patient_name: string;
-  claim_category: ApiCategory;
+  claim_category: ApiClaimCategory;
   treatment_date: string; // YYYY-MM-DD
   claimed_amt: number;
 }): Promise<ApiResponse> {

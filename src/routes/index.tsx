@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "Plum Health — File a Claim" },
+      { title: "Infinite Health • File a Claim" },
       {
         name: "description",
         content:
@@ -54,7 +54,7 @@ function Index() {
               <ShieldCheck className="h-5 w-5" />
             </div>
             <div>
-              <div className="text-sm font-semibold text-foreground">Insurance Health Inc.</div>
+              <div className="text-sm font-semibold text-foreground">Infinite Health Inc.</div>
               <div className="text-xs text-muted-foreground">
                 {policy.policy_holder.company_name} · {policy.policy_name}
               </div>
