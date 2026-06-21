@@ -60,18 +60,37 @@ export async function verifyDocument(params: {
   fd.append("claimed_amt", String(params.claimed_amt));
   fd.append("document", params.file);
 
+try {
   const res = await fetch(url, {
     method: "POST",
-    headers: { "X-API-Key": API_KEY }, // do NOT add Content-Type — FormData needs the browser-set boundary
+    headers: { "X-API-Key": API_KEY },
     body: fd,
   });
+
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status}: ${text.slice(0, 200) || res.statusText}`);
+    throw new Error(
+      `HTTP ${res.status}: ${
+        text.slice(0, 200) || res.statusText
+      }`
+    );
   }
+
   const rawResponse = await res.json();
+
   if (!rawResponse?.data?.processing_result) {
     throw new Error("Response missing processing_result");
   }
+
   return rawResponse.data as ApiResponse;
+
+} catch (err) {
+  if (err instanceof TypeError) {
+    throw new Error(
+      "Unable to connect to the backend. Facing server connectivity issues, please try again later."
+    );
+  }
+
+  throw err;
+}
 }
