@@ -2,7 +2,7 @@
 // Implements a confidence-based decision layer:
 //   - result === "FAIL" && confidence >= 0.7  -> FAILED  (user gets up to 3 tries)
 //   - result === "PASS" && confidence >= 0.6  -> APPROVED (locked)
-//   - everything else                          -> UNDER_REVIEW
+//   - everything else                         -> UNDER_REVIEW
 
 import type { CategoryKey } from "./policy";
 
@@ -33,53 +33,41 @@ export function decideFromResult(r: ProcessingResult): DocDecision {
   return "UNDER_REVIEW";
 }
 
-export const ENDPOINT_STORAGE_KEY = "claim_verify_endpoint";
-
-export function getEndpoint(): string {
-  if (typeof window === "undefined") return "";
-  return localStorage.getItem(ENDPOINT_STORAGE_KEY) ?? "";
-}
-
-export function setEndpoint(url: string) {
-  localStorage.setItem(ENDPOINT_STORAGE_KEY, url);
-}
+const API_URL = (import.meta.env.VITE_API_URL ?? "").replace(/\/+$/, "");
+const API_KEY = import.meta.env.VITE_API_KEY ?? "";
 
 export async function verifyDocument(params: {
-  endpoint: string;
   file: File;
+  document_category: string; // which document this is — "PRESCRIPTION", "HOSPITAL_BILL", etc.
   patient_name: string;
   claim_category: ApiCategory;
   treatment_date: string; // YYYY-MM-DD
   claimed_amt: number;
 }): Promise<ApiResponse> {
-  const base = params.endpoint.replace(/\/+$/, "");
-  const url = `${base}/process-claim`;
+  if (!API_URL) {
+    throw new Error("VITE_API_URL is not configured");
+  }
+  const url = `${API_URL}/process-claim`;
   const fd = new FormData();
   fd.append("patient_name", params.patient_name);
   fd.append("claim_category", params.claim_category);
+  fd.append("document_category", params.document_category);
   fd.append("treatment_date", params.treatment_date);
   fd.append("claimed_amt", String(params.claimed_amt));
   fd.append("document", params.file);
 
-  const res = await fetch(url, { method: "POST", body: fd });
-  console.log("<--------------------------------->");
-  console.log(res);
-  console.log("<--------------------------------->");
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "X-API-Key": API_KEY }, // do NOT add Content-Type — FormData needs the browser-set boundary
+    body: fd,
+  });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`HTTP ${res.status}: ${text.slice(0, 200) || res.statusText}`);
   }
-  // Parse the top-level response
   const rawResponse = await res.json();
-  console.log("\n", rawResponse);
-
-  // Checking the nested 'data' object where LangGraph's state actually lives
   if (!rawResponse?.data?.processing_result) {
-    console.log("\n", "Error Encountered");
     throw new Error("Response missing processing_result");
   }
-
-  // Returning the nested state (assuming ApiResponse maps to DocumentValidator)
-  console.log("\n", rawResponse.data);
   return rawResponse.data as ApiResponse;
 }

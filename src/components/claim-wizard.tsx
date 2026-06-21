@@ -25,14 +25,8 @@ import {
   type DocVerification,
   type ClaimLogEntry,
 } from "@/lib/claims-store";
-import {
-  decideFromResult,
-  getEndpoint,
-  setEndpoint,
-  mapCategoryToApi,
-  verifyDocument,
-  type DocDecision,
-} from "@/lib/doc-verify";
+import { decideFromResult, mapCategoryToApi, verifyDocument, type DocDecision } from "@/lib/doc-verify";
+
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -84,14 +78,17 @@ const STAGES: { id: StageId; title: string; subtitle: string }[] = [
 
 const HOSPITAL_OTHER = "__OTHER__";
 const MAX_DOC_ATTEMPTS = 3;
+function decideFromAverage(avg: number): "SUCCESS" | "HUMAN_REVIEW" {
+  return avg >= 0.8 ? "SUCCESS" : "HUMAN_REVIEW";
+}
 
 type FinalAnalysisState = {
-  status: "idle" | "running" | "done" | "error";
   fraudFlagged: boolean;
   sameDayCount: number;
-  confidence?: number;
-  outcome?: "SUCCESS" | "HUMAN_REVIEW";
-  error?: string;
+  perDocument: { type: string; label: string; confidence: number }[];
+  averageConfidence: number;
+  outcome: "SUCCESS" | "HUMAN_REVIEW";
+  reason: string;
 };
 
 type DocState = {
@@ -156,29 +153,81 @@ export function ClaimWizard({
   const [docs, setDocs] = useState<Record<string, DocState>>({});
   const inFlightRef = useRef<Set<string>>(new Set());
   const reqTokenRef = useRef<Record<string, number>>({});
-  const [endpoint, setEndpointState] = useState<string>("");
 
   const [unprocessableDoc, setUnprocessableDoc] = useState<string | null>(null);
+
+  const docReq = category ? (policy.document_requirements as any)[category.toUpperCase()] : null;
+  const allDocTypes: string[] = docReq ? [...docReq.required, ...docReq.optional] : [];
+
+  // Stage 5 - Final Analysis - if a required document is unprocessable, we route to manual review instead of final analysis, since the AI won't have any confidence scores to work with — we want to preserve the human review path
+  const [docManualReview, setDocManualReview] = useState<{ type: string; reason: string } | null>(
+    null,
+  );
   const [eventLog, setEventLog] = useState<ClaimLogEntry[]>([]);
+  const [logDialogOpen, setLogDialogOpen] = useState(false);
 
   function logEvent(stage: string, event: string, detail?: Record<string, unknown>) {
     setEventLog((l) => [...l, { at: new Date().toISOString(), stage, event, detail }]);
   }
 
-  const docReq = category ? (policy.document_requirements as any)[category.toUpperCase()] : null;
-  const allDocTypes: string[] = docReq ? [...docReq.required, ...docReq.optional] : [];
+  // We only get here, in the normal path, once every required document is
+  // approved (an unprocessable required doc routes through docManualReview
+  // instead, before reaching this stage). allRequiredApproved below is a
+  // defensive re-check of that assumption, not the primary gate — if it's
+  // ever false, don't average in a non-approved document's confidence.
+  const finalAnalysis = useMemo<FinalAnalysisState | null>(() => {
+    if (!eligibility || docManualReview) return null;
 
-  // Stage 5 — Final Analysis
-  const [finalAnalysisEndpoint, setFinalAnalysisEndpointState] = useState<string>("");
-  useEffect(() => {
-    setFinalAnalysisEndpointState(getFinalAnalysisEndpoint());
-  }, []);
-  const [finalAnalysis, setFinalAnalysis] = useState<FinalAnalysisState | null>(null);
-  const [showLogs, setShowLogs] = useState(false);
+    const sameDayCount = eligibility.sameDayCount;
+    if (eligibility.sameDayFlagged) {
+      return {
+        fraudFlagged: true,
+        sameDayCount,
+        perDocument: [],
+        averageConfidence: 0,
+        outcome: "HUMAN_REVIEW",
+        reason: `Unusual same-day claim pattern (${sameDayCount} prior claims today).`,
+      };
+    }
 
-  const [docManualReview, setDocManualReview] = useState<{ type: string; reason: string } | null>(
-    null,
-  );
+    const required: string[] = docReq?.required ?? [];
+    const allRequiredApproved = required.every((t) => docs[t]?.status === "approved");
+
+    const scored: { type: string; label: string; confidence: number }[] = [];
+    for (const t of allDocTypes) {
+      const d = docs[t];
+      if (d?.status === "approved" && typeof d.confidence === "number") {
+        scored.push({ type: t, label: DOCUMENT_TYPES[t] ?? t, confidence: d.confidence });
+      }
+    }
+
+    if (!allRequiredApproved || scored.length === 0) {
+      return {
+        fraudFlagged: false,
+        sameDayCount,
+        perDocument: scored,
+        averageConfidence: 0,
+        outcome: "HUMAN_REVIEW",
+        reason: !allRequiredApproved
+          ? "Not all required documents are approved."
+          : "No verified document confidence scores available.",
+      };
+    }
+
+    const averageConfidence = scored.reduce((s, d) => s + d.confidence, 0) / scored.length;
+    const outcome = decideFromAverage(averageConfidence);
+
+    return {
+      fraudFlagged: false,
+      sameDayCount,
+      perDocument: scored,
+      averageConfidence,
+      outcome,
+      reason: `Average document confidence ${(averageConfidence * 100).toFixed(0)}% — ${
+        outcome === "SUCCESS" ? "above" : "below"
+      } the 80% threshold.`,
+    };
+  }, [eligibility, docs, docReq, allDocTypes, docManualReview]);
 
   function lookupMember() {
     const m = getMember(memberIdInput.trim());
@@ -226,8 +275,14 @@ export function ClaimWizard({
       setLocked((l) => ({ ...l, documents: true }));
       setCurrent("analysis");
     } else if (stage === "analysis") {
-      if (!docManualReview && (!finalAnalysis || finalAnalysis.status !== "done")) {
-        return toast.error("Run final analysis before continuing.");
+      if (!docManualReview && !finalAnalysis) {
+        return toast.error("Final analysis is not ready yet.");
+      }
+      if (finalAnalysis) {
+        logEvent("analysis", `Final analysis: ${finalAnalysis.outcome} — ${finalAnalysis.reason}`, {
+          averageConfidence: finalAnalysis.averageConfidence,
+          perDocument: finalAnalysis.perDocument,
+        });
       }
       setLocked((l) => ({ ...l, analysis: true }));
       setCurrent("review");
@@ -285,10 +340,6 @@ export function ClaimWizard({
 
   // Upload + verify a single document against the langgraph endpoint.
   async function uploadDoc(type: string, file: File) {
-    if (!endpoint) {
-      toast.error("Set the verification endpoint URL first.");
-      return;
-    }
     if (file.size > 5 * 1024 * 1024) return toast.error(`${file.name} exceeds 5MB limit.`);
     const ok = ["application/pdf", "image/jpeg", "image/png"].includes(file.type);
     if (!ok) return toast.error("Only PDF, JPG, or PNG accepted.");
@@ -322,8 +373,8 @@ export function ClaimWizard({
 
     try {
       const resp = await verifyDocument({
-        endpoint,
         file,
+        document_category: type,
         patient_name: claimant?.name ?? "",
         claim_category: mapCategoryToApi(category as CategoryKey),
         treatment_date: treatmentDate,
@@ -346,14 +397,19 @@ export function ClaimWizard({
           reasoning: resp.processing_result.reasoning,
         },
       }));
-      logEvent("documents", `${DOCUMENT_TYPES[type] ?? type} attempt ${attempt}/${MAX_DOC_ATTEMPTS}: ${status}`, {
-        confidence: resp.processing_result.confidence_score,
-        reasoning: resp.processing_result.reasoning,
-      });
+      logEvent(
+        "documents",
+        `${DOCUMENT_TYPES[type] ?? type} attempt ${attempt}/${MAX_DOC_ATTEMPTS}: ${status}`,
+        {
+          ...resp, // full state LangGraph sent back for this document — not just the fields we act on
+        },
+      );
 
       if (status === "approved") toast.success(`${DOCUMENT_TYPES[type] ?? type} verified.`);
       else if (status === "unprocessable") {
-        toast.error(`${DOCUMENT_TYPES[type] ?? type} could not be verified after ${MAX_DOC_ATTEMPTS} attempts. Marked unprocessable.`);
+        toast.error(
+          `${DOCUMENT_TYPES[type] ?? type} could not be verified after ${MAX_DOC_ATTEMPTS} attempts. Marked unprocessable.`,
+        );
         if ((docReq?.required ?? []).includes(type)) setUnprocessableDoc(type);
       } else if (status === "failed")
         toast.error(
@@ -364,7 +420,10 @@ export function ClaimWizard({
       if (reqTokenRef.current[type] !== myToken) return;
       const cappedOut = attempt >= MAX_DOC_ATTEMPTS;
       const status = cappedOut ? "unprocessable" : "error";
-      setDocs((d) => ({ ...d, [type]: { ...prev, file, attempts: attempt, status, error: e?.message ?? "Upload failed" } }));
+      setDocs((d) => ({
+        ...d,
+        [type]: { ...prev, file, attempts: attempt, status, error: e?.message ?? "Upload failed" },
+      }));
       logEvent("documents", `${DOCUMENT_TYPES[type] ?? type} attempt ${attempt}/${MAX_DOC_ATTEMPTS}: ${status}`, {
         error: e?.message,
       });
@@ -559,16 +618,11 @@ export function ClaimWizard({
       admin_override: adminOverride,
       reason:
         status === "REJECTED"
-          ? eligibility.rules
-              .filter((r) => !r.ok)
-              .map((r) => r.label)
-              .join("; ")
+          ? eligibility.rules.filter((r) => !r.ok).map((r) => r.label).join("; ")
           : docManualReview
           ? `Submitted for manual review — ${docManualReview.reason}`
           : finalAnalysis?.outcome === "HUMAN_REVIEW"
-          ? finalAnalysis.fraudFlagged
-            ? `Unusual same-day claim pattern (${finalAnalysis.sameDayCount} prior claims today) — routed to human review.`
-            : `Final analysis confidence ${((finalAnalysis.confidence ?? 0) * 100).toFixed(0)}% below threshold — routed to human review.`
+          ? finalAnalysis.reason
           : docOutcome.reason,
       documents,
       log,
@@ -601,11 +655,10 @@ export function ClaimWizard({
     setDocs({});
     setVerifyResult(null);
     setAdminOverride("NO");
-    setFinalAnalysis(null);
-    setShowLogs(false);
     setUnprocessableDoc(null);
     setDocManualReview(null);
     setEventLog([]);
+    setLogDialogOpen(false);
   }
 
   function persistAbandonedClaim(reason: string) {
@@ -660,7 +713,12 @@ export function ClaimWizard({
             </div>
           </div>
         </div>
-        <Badge variant="secondary">In progress</Badge>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => setLogDialogOpen(true)} className="gap-1.5">
+            <Eye className="h-3.5 w-3.5" /> View log ({eventLog.length})
+          </Button>
+          <Badge variant="secondary">In progress</Badge>
+        </div>
       </div>
 
       <div className="grid gap-8 lg:grid-cols-[280px_1fr]">
@@ -1077,27 +1135,6 @@ export function ClaimWizard({
                 </div>
               ) : (
                 <div className="space-y-4">
-                  {/* Endpoint configuration */}
-                  <div className="rounded-lg border border-dashed border-border bg-muted/30 p-3">
-                    <Label htmlFor="ep" className="text-xs uppercase tracking-wide text-muted-foreground">
-                      Verification endpoint (langgraph /process-claim)
-                    </Label>
-                    <Input
-                      id="ep"
-                      placeholder="https://your-host"
-                      value={endpoint}
-                      onChange={(e) => {
-                        setEndpointState(e.target.value);
-                        setEndpoint(e.target.value);
-                      }}
-                      className="mt-1.5 font-mono text-xs"
-                    />
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      Each document is POSTed individually as <code>multipart/form-data</code> to{" "}
-                      <code>{endpoint || "<host>"}/process-claim</code>.
-                    </p>
-                  </div>
-
                   <p className="text-xs text-muted-foreground">
                     Required for <span className="font-medium text-foreground">{category}</span>.
                     PDF/JPG/PNG, max 5MB. Each document allows up to {MAX_DOC_ATTEMPTS} verification attempts.
@@ -1127,64 +1164,7 @@ export function ClaimWizard({
           {(current === "analysis" || locked.analysis) && eligibility && (
             <StageCard title="5. Final Analysis" locked={locked.analysis} active={current === "analysis"}>
               <div className="space-y-4">
-                {/* Verification logs — optional view (unchanged from before) */}
-                <div className="rounded-lg border border-border">
-                  <button
-                    type="button"
-                    onClick={() => setShowLogs((s) => !s)}
-                    className="flex w-full items-center justify-between gap-2 p-3 text-sm font-medium text-foreground"
-                  >
-                    <span className="flex items-center gap-2">
-                      <Eye className="h-4 w-4" /> Document verification logs
-                    </span>
-                    {showLogs ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-                  </button>
-                  {showLogs && (
-                    <div className="space-y-2 border-t border-border p-3">
-                      {allDocTypes.filter((t) => docs[t]?.file).length === 0 && (
-                        <p className="text-xs text-muted-foreground">No documents uploaded.</p>
-                      )}
-                      {allDocTypes.map((t) => {
-                        const d = docs[t];
-                        if (!d?.file) return null;
-                        return (
-                          <div key={t} className="rounded-md bg-muted/40 p-2.5 text-xs">
-                            <div className="flex flex-wrap items-center gap-2 font-medium text-foreground">
-                              <FileText className="h-3.5 w-3.5" /> {DOCUMENT_TYPES[t] ?? t} — {d.file.name}
-                              <Badge
-                                variant="outline"
-                                className={cn(
-                                  d.status === "approved" && "border-primary/40 text-primary",
-                                  (d.status === "failed" || d.status === "unprocessable") &&
-                                    "border-destructive/40 text-destructive",
-                                  d.status === "review" && "border-amber-500/40 text-amber-600",
-                                )}
-                              >
-                                {d.status}
-                              </Badge>
-                              <span className="text-muted-foreground">
-                                attempts {d.attempts}/{MAX_DOC_ATTEMPTS}
-                              </span>
-                            </div>
-                            {d.confidence !== undefined && (
-                              <div className="mt-1 text-muted-foreground">
-                                confidence {(d.confidence * 100).toFixed(0)}%
-                              </div>
-                            )}
-                            {d.reasoning && (
-                              <div className="mt-1 whitespace-pre-line text-muted-foreground">{d.reasoning}</div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-
-                {/* ===== NEW: branch on docManualReview ===== */}
                 {docManualReview ? (
-                  // The document dialog already decided this claim needs a human. Show that,
-                  // skip the fraud panel + endpoint config + LLM call entirely.
                   <div className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
                     <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
                     <div className="min-w-0 flex-1 text-sm">
@@ -1194,7 +1174,6 @@ export function ClaimWizard({
                   </div>
                 ) : (
                   <>
-                    {/* Fraud-detection: same-day claim pattern (unchanged from before) */}
                     <div className="flex items-start gap-3 rounded-lg border border-border p-3">
                       <span
                         className={cn(
@@ -1212,99 +1191,50 @@ export function ClaimWizard({
                         <div className="text-sm font-medium text-foreground">Same-day claim pattern</div>
                         <div className="text-xs text-muted-foreground">
                           {eligibility.sameDayFlagged
-                            ? `Member ${primary?.member_id} has already submitted ${eligibility.sameDayCount} claim(s) today — this would be claim #${eligibility.sameDayCount + 1}. Flagged for human review, not auto-rejected.`
+                            ? `Member ${primary?.member_id} has already submitted ${eligibility.sameDayCount} claim(s) today. Flagged for human review, not auto-rejected.`
                             : `${eligibility.sameDayCount} prior claim(s) from this member today — within normal range.`}
                         </div>
                       </div>
                     </div>
 
-                    {/* Endpoint config (unchanged from before — you'll delete this block later
-                        when you do the .env migration; leave it as-is for now) */}
-                    {!eligibility.sameDayFlagged &&
-                      (!finalAnalysis || finalAnalysis.status === "idle" || finalAnalysis.status === "error") && (
-                        <div className="rounded-lg border border-dashed border-border bg-muted/30 p-3">
-                          <Label htmlFor="fae" className="text-xs uppercase tracking-wide text-muted-foreground">
-                            Final analysis endpoint
-                          </Label>
-                          <Input
-                            id="fae"
-                            placeholder="https://your-host"
-                            value={finalAnalysisEndpoint}
-                            onChange={(e) => {
-                              setFinalAnalysisEndpointState(e.target.value);
-                              setFinalAnalysisEndpoint(e.target.value);
-                            }}
-                            className="mt-1.5 font-mono text-xs"
-                          />
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            Sends the assembled claim (eligibility outcome + document verification results) as JSON
-                            to <code>{finalAnalysisEndpoint || "<host>"}/final-analysis</code>.
-                          </p>
-                        </div>
-                      )}
-
-                    {/* Confidence result (unchanged from before) */}
-                    {finalAnalysis?.status === "done" && !finalAnalysis.fraudFlagged && (
-                      <div
-                        className={cn(
-                          "flex items-start gap-3 rounded-lg border p-3",
-                          finalAnalysis.outcome === "SUCCESS"
-                            ? "border-primary/30 bg-primary/5"
-                            : "border-amber-500/30 bg-amber-500/5",
-                        )}
-                      >
-                        {finalAnalysis.outcome === "SUCCESS" ? (
-                          <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-                        ) : (
-                          <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-                        )}
-                        <div className="min-w-0 flex-1 text-sm">
-                          <div className="font-medium text-foreground">
-                            Confidence {((finalAnalysis.confidence ?? 0) * 100).toFixed(0)}% —{" "}
-                            {finalAnalysis.outcome === "SUCCESS" ? "Passed" : "Flagged for human review"}
-                          </div>
-                          <div className="text-xs text-muted-foreground">
-                            {finalAnalysis.outcome === "SUCCESS"
-                              ? "Above the 80% confidence threshold."
-                              : "Below the 80% confidence threshold."}
+                    {finalAnalysis && !finalAnalysis.fraudFlagged && (
+                      <div className="space-y-2">
+                        <div className="text-sm font-medium text-foreground">Per-document confidence</div>
+                        <ul className="divide-y divide-border rounded-lg border border-border">
+                          {finalAnalysis.perDocument.map((d) => (
+                            <li key={d.type} className="flex items-center justify-between p-2.5 text-sm">
+                              <span className="text-foreground">{d.label}</span>
+                              <span className="text-muted-foreground">{(d.confidence * 100).toFixed(0)}%</span>
+                            </li>
+                          ))}
+                        </ul>
+                        <div
+                          className={cn(
+                            "flex items-start gap-3 rounded-lg border p-3",
+                            finalAnalysis.outcome === "SUCCESS"
+                              ? "border-primary/30 bg-primary/5"
+                              : "border-amber-500/30 bg-amber-500/5",
+                          )}
+                        >
+                          {finalAnalysis.outcome === "SUCCESS" ? (
+                            <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                          ) : (
+                            <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                          )}
+                          <div className="min-w-0 flex-1 text-sm">
+                            <div className="font-medium text-foreground">
+                              Average confidence {(finalAnalysis.averageConfidence * 100).toFixed(0)}% —{" "}
+                              {finalAnalysis.outcome === "SUCCESS" ? "Approved" : "Flagged for human review"}
+                            </div>
+                            <div className="text-xs text-muted-foreground">{finalAnalysis.reason}</div>
                           </div>
                         </div>
-                      </div>
-                    )}
-
-                    {finalAnalysis?.status === "error" && (
-                      <div className="rounded-md bg-destructive/5 p-2.5 text-xs text-destructive">
-                        {finalAnalysis.error}
                       </div>
                     )}
                   </>
                 )}
 
-                {/* ===== NEW: action row also branches on docManualReview ===== */}
-                {!locked.analysis && (
-                  <div className="flex flex-wrap items-center gap-2">
-                    {docManualReview ? (
-                      <StageActions onSubmit={() => submitStage("analysis")} />
-                    ) : (
-                      <>
-                        <Button onClick={runFinalAnalysisStage} disabled={finalAnalysis?.status === "running"}>
-                          {finalAnalysis?.status === "running" ? (
-                            <>
-                              <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Analyzing…
-                            </>
-                          ) : (
-                            <>
-                              <BadgeCheck className="mr-2 h-4 w-4" /> Run Final Analysis
-                            </>
-                          )}
-                        </Button>
-                        {finalAnalysis?.status === "done" && (
-                          <StageActions onSubmit={() => submitStage("analysis")} />
-                        )}
-                      </>
-                    )}
-                  </div>
-                )}
+                {!locked.analysis && <StageActions onSubmit={() => submitStage("analysis")} />}
               </div>
             </StageCard>
           )}
@@ -1323,10 +1253,10 @@ export function ClaimWizard({
                     ["Estimated payout", `₹${eligibility.approvedAmount.toLocaleString("en-IN")}`],
                     [
                       "Final analysis",
-                      finalAnalysis
-                        ? finalAnalysis.fraudFlagged
-                          ? "Flagged — same-day claim pattern"
-                          : `${finalAnalysis.outcome === "SUCCESS" ? "Passed" : "Flagged"} — confidence ${((finalAnalysis.confidence ?? 0) * 100).toFixed(0)}%`
+                      docManualReview
+                        ? `Manual review — ${docManualReview.reason}`
+                        : finalAnalysis
+                        ? `${finalAnalysis.outcome === "SUCCESS" ? "Approved" : "Flagged"} — avg confidence ${(finalAnalysis.averageConfidence * 100).toFixed(0)}%`
                         : "Not run",
                     ],
                     [
@@ -1356,6 +1286,38 @@ export function ClaimWizard({
           )}
         </section>
       </div>
+
+      <Dialog open={logDialogOpen} onOpenChange={setLogDialogOpen}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Eye className="h-4 w-4" /> Claim activity log
+            </DialogTitle>
+            <DialogDescription>
+              Ticket {ticket} — every state transition, plus the full verification response per document.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-[60vh] space-y-2 overflow-y-auto">
+            {eventLog.length === 0 && <p className="text-sm text-muted-foreground">No activity yet.</p>}
+            {eventLog.map((entry, i) => (
+              <div key={i} className="rounded-md bg-muted/40 p-2.5 text-xs">
+                <div className="flex items-center gap-2 text-muted-foreground">
+                  <span className="font-mono">{new Date(entry.at).toLocaleTimeString()}</span>
+                  <Badge variant="outline" className="text-[10px]">
+                    {entry.stage}
+                  </Badge>
+                </div>
+                <div className="mt-0.5 text-foreground">{entry.event}</div>
+                {entry.detail && (
+                  <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-background/60 p-2 text-[10px] text-muted-foreground">
+                    {JSON.stringify(entry.detail, null, 2)}
+                  </pre>
+                )}
+              </div>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={!!unprocessableDoc} onOpenChange={() => {}}>
         <DialogContent
