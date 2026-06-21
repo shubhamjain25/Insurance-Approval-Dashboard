@@ -238,6 +238,10 @@ export function evaluateEligibility(input: EligibilityInput): EligibilityOutput 
     notes.push(
       `Claim capped at remaining annual OPD limit ₹${opdRemaining.toLocaleString("en-IN")}.`,
     );
+
+  console.log(
+    `DEBUG: Amount=${input.amount}, Policy Threshold=${policy.fraud_thresholds.high_value_claim_threshold}`,
+  );
   if (input.amount >= policy.fraud_thresholds.high_value_claim_threshold)
     notes.push(`High-value claim — routed to manual review.`);
 

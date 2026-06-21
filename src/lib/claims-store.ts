@@ -17,6 +17,13 @@ export type DocVerification = {
   required: boolean;
 };
 
+export type ClaimLogEntry = {
+  at: string; // ISO timestamp
+  stage: string;
+  event: string;
+  detail?: Record<string, unknown>;
+};
+
 export type StoredClaim = {
   id: string;
   ticket?: string;
@@ -35,6 +42,7 @@ export type StoredClaim = {
   reason: string;
   admin_override?: "YES" | "NO";
   documents: DocVerification[];
+  log?: ClaimLogEntry[]; // full chronological event trail for this ticket
 };
 
 const KEY = "plum_claims_v1";
