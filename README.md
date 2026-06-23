@@ -2,6 +2,10 @@
 
 AI-assisted health insurance claims processing — a guided, multi-stage wizard that takes a claim from member lookup through AI-verified document submission, fraud screening, confidence-based final adjudication, and a fully auditable activity log, all gated by deterministic, validated rules at every step.
 
+- 🎥 [YouTube Architecture & Project Walkthrough](https://www.youtube.com/watch?v=qGBj17hSVvU)
+- 🌐 [LangGraph Workflow Live Demo](https://insurance-langgraph-flow.onrender.com/)
+- 📂 [LangGraph Workflow Repository](https://github.com/shubhamjain25/Insurance-Langgraph-Flow)
+
 This README documents the system design and the reasoning behind it, not just the feature list.
 
 ## Documentation
